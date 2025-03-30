@@ -1,0 +1,37 @@
+### 第一阶段：视觉语义对齐
+training:
+  epochs: 50
+  batch_size: 128
+  optimizer:
+    type: AdamW
+    lr: 1e-5
+    weight_decay: 0.01
+  lr_scheduler:
+    type: CosineAnnealing
+    T_max: 1000
+  frozen_modules:
+    - text_encoder
+    - action_decoder
+    - sem_decomp.relation_net
+  mixed_precision: True
+
+data:
+  dataset: LAION-1B
+  image_dir: /data/laion/images
+  text_manifest: /data/laion/metadata.parquet
+  augmentations:
+    sim2real:
+      texture_variation: 0.8
+      lighting_range: [0.7, 1.3] 
+      random_occlusion: 0.3
+    text:
+      back_translation: True
+      synonym_replacement: 0.2
+
+model:
+  visual:
+    vit_pretrained: /pretrained/clip_vit-h-14
+    freeze_patch_emb: False
+  projection:
+    dim: 2048
+    init_scale: 0.07
