@@ -1,0 +1,39 @@
+# configs/deploy_jetson.yaml
+### Jetson AGX Orin部署配置
+hardware:
+  device: jetson_agx_orin
+  tensorrt:
+    precision: FP16
+    max_batch_size: 8
+    workspace_size: 4096
+  quantization:
+    dynamic_act: True
+    weight_bits: 8
+    act_bits: 8
+
+inference:
+  image_preprocess:
+    jpeg_decoder: nvjpeg
+    resize_method: tensorrt_bilinear
+    normalization: clip_standard
+  latency_optimization:
+    parallel_pipelines: 3
+    feature_cache_ttl: 1.5  # 秒
+    action_prefetch: 2
+
+model_optimization:
+  pruned_modules:
+    - text_encoder.layers[30:]
+    - visual_encoder.blocks[20:]
+  kernel_fusion:
+    enable: True
+    patterns: [vit_attn, cross_attn]
+
+runtime:
+  max_fps: 15
+  safety_check:
+    force_threshold: 0.5  # 牛
+    torque_limit: [4.5, 4.5, 4.5]  # XYZ轴力矩限制
+  fallback_policy:
+    retry_attempts: 2
+    default_grasp: top_center
