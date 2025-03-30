@@ -1,0 +1,209 @@
+import torch
+import torch.nn as nn
+from transformers import AutoModel, AutoTokenizer
+from timm.models.vision_transformer import VisionTransformer
+
+# 🌟 语义分解模块核心组件
+class SemanticDecomposition(nn.Module):
+    def __init__(self, visual_dim=1280, text_dim=4096):
+        super().__init__()
+        
+        # 属性解析分支
+        self.attr_net = nn.Sequential(
+            nn.Conv2d(visual_dim, 256, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            ResNet18Block(256),
+            MultiHeadAttention(256, 4)  # 多头注意力
+        )
+        
+        # 关系推理分支
+        self.relation_net = GraphAttentionNetwork(
+            node_dim=256,
+            edge_dim=64,
+            num_heads=4
+        )
+        
+        # 任务对齐交叉注意力
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=512,
+            num_heads=8,
+            kdim=text_dim,
+            vdim=text_dim
+        )
+
+    def forward(self, visual_feat, text_feat):
+        # 属性特征提取
+        attr_feat = self.attr_net(visual_feat)  # [B,256,H',W']
+        
+        # 构建场景图
+        node_features = self.graph_builder(visual_feat)
+        adj_matrix = self.relation_net(node_features)
+        
+        # 跨模态对齐
+        aligned_feat, _ = self.cross_attn(
+            query=attr_feat.flatten(2),
+            key=text_feat,
+            value=text_feat
+        )
+        return aligned_feat, adj_matrix
+
+# 🌟 改进的动作生成层
+class ActionDecoder(nn.Module):
+    def __init__(self, hidden_dim=2048):
+        super().__init__()
+        self.bin_discretizer = nn.Embedding(256, 6)  # 6D动作空间
+        
+        self.lstm = nn.LSTM(
+            input_size=hidden_dim,
+            hidden_size=1024,
+            num_layers=3,
+            bidirectional=True
+        )
+        
+        # CoT规划头
+        self.cot_head = nn.Sequential(
+            nn.Linear(2048, 4096),
+            nn.GELU(),
+            nn.Linear(4096, 4096)  # 匹配Yi-34B隐藏层
+        )
+        
+        # 动作预测头
+        self.action_head = nn.Sequential(
+            nn.Linear(2048, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256 * 7)  # 7个动作维度×256 bins
+        )
+
+    def forward(self, fused_feat):
+        # 生成CoT规划文本
+        cot_logits = self.cot_head(fused_feat)
+        
+        # 时序动作生成
+        lstm_out, _ = self.lstm(fused_feat.unsqueeze(1))
+        action_logits = self.action_head(lstm_out)
+        return cot_logits, action_logits.view(-1,7,256)
+
+# 🌟 完整模型整合
+class UniversalGraspingVLA(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+        # 视觉编码器
+        self.visual_encoder = VisionTransformer(
+            img_size=448,
+            patch_size=14,
+            embed_dim=1280,
+            depth=32,
+            num_heads=16
+        )
+        
+        # 语言模型（使用HuggingFace接口）
+        self.text_encoder = AutoModel.from_pretrained("01-ai/Yi-VL-34B")
+        self.tokenizer = AutoTokenizer.from_pretrained("01-ai/Yi-VL-34B")
+        
+        # 语义分解模块
+        self.sem_decomp = SemanticDecomposition()
+        
+        # 动态投影层
+        self.projector = nn.Linear(1280+4096, 2048)
+        
+        # 动作解码器
+        self.action_decoder = ActionDecoder()
+        
+        # 🌟 动态词汇表约束
+        self.register_buffer('action_vocab', 
+            torch.randint(0, 256, (7, 256)))
+
+    def forward(self, images, instructions):
+        # 视觉特征提取
+        visual_feat = self.visual_encoder(images)  # [B, 197, 1280]
+        patch_feat = visual_feat[:, 1:]  # 去除cls token
+        
+        # 文本特征提取
+        text_input = self.tokenizer(
+            instructions, 
+            return_tensors='pt',
+            padding=True
+        ).to(images.device)
+        text_feat = self.text_encoder(**text_input).last_hidden_state
+        
+        # 语义分解与对齐
+        aligned_feat, adj_matrix = self.sem_decomp(
+            patch_feat.permute(0,2,1).view(-1,1280,16,16),
+            text_feat
+        )
+        
+        # 特征融合
+        fused_feat = self.projector(
+            torch.cat([visual_feat[:,0], text_feat[:,0]], dim=1)
+        )
+        
+        # 动作生成
+        cot_logits, action_logits = self.action_decoder(fused_feat)
+        
+        # 🌟 应用动态词汇表约束
+        action_logits = action_logits * self.action_vocab.unsqueeze(0)
+        return cot_logits, action_logits
+
+# 🌟 训练优化策略
+class CustomTrainer:
+    def __init__(self, model, stages=3):
+        self.model = model
+        self.stages = stages
+        
+    def train_stage(self, stage, dataloader):
+        # 分阶段解冻参数
+        if stage == 1:
+            freeze_params(self.model.text_encoder)
+            freeze_params(self.model.action_decoder)
+        elif stage == 2:
+            unfreeze_params(self.model.sem_decomp.relation_net)
+        elif stage == 3:
+            unfreeze_params(self.model)
+        
+        # 混合精度训练
+        scaler = torch.cuda.amp.GradScaler()
+        
+        for batch in dataloader:
+            with torch.cuda.amp.autocast():
+                cot_pred, action_pred = self.model(batch['images'], batch['instructions'])
+                loss = self.calculate_loss(cot_pred, action_pred, batch)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
+    def calculate_loss(self, cot_pred, action_pred, batch):
+        # CoT文本损失
+        cot_loss = F.cross_entropy(
+            cot_pred.view(-1, 32000),  # Yi-34B词汇表大小
+            batch['cot_labels'].view(-1)
+        )
+        
+        # 动作离散化损失
+        action_loss = sum(
+            F.cross_entropy(
+                action_pred[:,i], 
+                batch['action_labels'][:,i]
+            ) for i in range(7)
+        )
+        
+        # 🌟 对抗训练损失
+        real_actions = batch['action_labels']
+        fake_actions = action_pred.argmax(-1)
+        adv_loss = F.mse_loss(
+            self.discriminator(real_actions),
+            self.discriminator(fake_actions.detach())
+        )
+        
+        return cot_loss + 0.7*action_loss + 0.3*adv_loss
+
+# 辅助函数
+def freeze_params(module):
+    for param in module.parameters():
+        param.requires_grad_(False)
+
+def unfreeze_params(module):
+    for param in module.parameters():
+        param.requires_grad_(True)
