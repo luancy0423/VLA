@@ -1,0 +1,38 @@
+### 第二阶段：关系推理强化
+training:
+  epochs: 100
+  batch_size: 64  
+  optimizer:
+    type: AdamW
+    lr: 3e-6
+    weight_decay: 0.005
+  lr_scheduler: 
+    type: OneCycle
+    max_lr: 5e-5
+    pct_start: 0.3
+  unfrozen_modules:
+    - sem_decomp.relation_net
+    - sem_decomp.cross_attn
+  adversarial_weight: 0.3
+
+data:
+  datasets:
+    - name: GraspNet-5M
+      path: /data/graspnet/trajectories
+      ratio: 0.8
+    - name: Relation-20M 
+      path: /data/spatial_relations
+      ratio: 0.2
+  relation_aug:
+    max_occlusion: 3
+    support_angle_variation: 15
+    contact_point_jitter: 0.05
+
+model:
+  relation_net:
+    gnn_layers: 3
+    attention_heads: 8
+    edge_dim: 128
+  dynamic_graph:
+    update_interval: 50
+    max_validation_qa: 3
