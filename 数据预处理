@@ -1,0 +1,29 @@
+# 数据预处理示例
+class GraspDataset(torch.utils.data.Dataset):
+    def __init__(self, stage):
+        self.sim2real_transform = Compose([
+            RandomResizedCrop(448),
+            ColorJitter(0.4,0.4,0.4),
+            GaussianBlur(3),
+            RandAugment(num_ops=3)
+        ])
+        
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        
+        # 图像增强
+        image = self.sim2real_transform(Image.open(item['image_path']))
+        
+        # 指令增强
+        if random.random() < 0.5:
+            instruction = back_translate(item['instruction'])  # 回译增强
+        
+        # 动作离散化
+        action = discretize_6d_pose(item['ground_truth_pose'])
+        
+        return {
+            'images': image,
+            'instructions': instruction,
+            'cot_labels': item['cot_chain'],
+            'action_labels': action
+        }
