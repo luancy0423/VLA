@@ -1,0 +1,94 @@
+import pytest
+import torch
+from model import UniversalGraspingVLA  # 修改为实际模块路径
+
+@pytest.fixture
+def vla_model():
+    return UniversalGraspingVLA()
+
+@pytest.fixture
+def visual_input():
+    return torch.randn(1, 3, 448, 448)  # 调整输入分辨率至448x448
+
+@pytest.fixture
+def text_input():
+    return ["抓取右侧的透明物体"]  # 适配中文指令输入
+
+def test_model_initialization(vla_model):
+    """验证模型组件初始化正确性"""
+    assert isinstance(vla_model.visual_encoder, VisionTransformer)
+    assert vla_model.text_encoder.config.model_type == "yi-vl-34b"
+    assert hasattr(vla_model, 'sem_decomp')
+    assert isinstance(vla_model.action_decoder, ActionDecoder)
+
+def test_forward_pass_shapes(vla_model, visual_input, text_input):
+    """验证前向传播输出形状"""
+    cot_logits, action_logits = vla_model(visual_input, text_input)
+    
+    # 验证CoT文本输出维度
+    assert cot_logits.shape == (1, 1024, 32000)  # 适配Yi-34B词汇表大小
+    
+    # 验证动作输出维度 (batch, action_dims, bins)
+    assert action_logits.shape == (1, 7, 256)    # 7自由度×256bins
+
+def test_multi_batch_processing(vla_model, text_input):
+    """验证多批次输入处理能力"""
+    batch_images = torch.randn(3, 3, 448, 448)  # 批次大小=3
+    cot_logits, action_logits = vla_model(batch_images, text_input*3)
+    assert cot_logits.shape[0] == 3
+    assert action_logits.shape[0] == 3
+
+def test_dynamic_vocab_constraint(vla_model, visual_input, text_input):
+    """验证动态词汇表约束机制"""
+    _, action_logits = vla_model(visual_input, text_input)
+    # 检查未登录token是否被正确mask
+    assert torch.all(action_logits[:, :, 255] == -1e9)  # 假设保留最后1个token
+
+def test_multi_modal_inputs(vla_model):
+    """验证多模态输入异常处理"""
+    # 测试缺失视觉输入
+    with pytest.raises(RuntimeError):
+        vla_model(None, ["test instruction"])
+    
+    # 测试缺失语言输入
+    with pytest.raises(TypeError):
+        vla_model(torch.randn(1,3,448,448), None)
+
+def test_action_space_config(vla_model):
+    """验证动作空间离散化参数"""
+    assert vla_model.action_decoder.action_head[-1].out_features == 1792  # 7×256=1792
+    assert vla_model.action_vocab.shape == (7, 256)  # 各自由度词汇表
+
+def test_semantic_decomposition(vla_model, visual_input, text_input):
+    """验证语义分解模块特征形状"""
+    # 获取中间层特征
+    visual_feat = vla_model.visual_encoder(visual_input)
+    text_feat = vla_model.text_encoder(
+        vla_model.tokenizer(text_input, return_tensors='pt').input_ids
+    ).last_hidden_state
+    
+    aligned_feat, adj_matrix = vla_model.sem_decomp(
+        visual_feat[:,1:].permute(0,2,1).view(1,1280,16,16),
+        text_feat
+    )
+    assert aligned_feat.shape[1:] == (256, 16, 16)  # 对齐特征形状
+    assert adj_matrix.shape == (16, 16)             # 场景图邻接矩阵
+
+def test_training_mode(vla_model, visual_input, text_input):
+    """验证训练模式下的梯度计算"""
+    vla_model.train()
+    cot_logits, action_logits = vla_model(visual_input, text_input)
+    loss = cot_logits.mean() + action_logits.mean()
+    loss.backward()
+    
+    # 验证关键参数梯度
+    assert vla_model.sem_decomp.attr_net[0].weight.grad is not None
+    assert vla_model.action_decoder.lstm.weight_hh_l0.grad is not None
+
+def test_inference_speed(vla_model, visual_input, text_input):
+    """验证单帧推理时延"""
+    import time
+    start = time.time()
+    _ = vla_model(visual_input, text_input)
+    elapsed = time.time() - start
+    assert elapsed < 1.0  # 初步基准测试，实际部署需要优化
